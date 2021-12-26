@@ -50,7 +50,7 @@ def poll(interval, concurrency):
       item = update_state(item, resp)
       # if not pass, stick in notify queue
       if item.state != 'PASS':
-        print("Adding {} in notifiation queue".format(item.name, item.state, resp) )
+        # print("Adding {} {} {}".format(item.name, item.state, resp) )
         notifyQ.put(item)
         continue
       # back to the end of the line
@@ -63,10 +63,10 @@ def poll(interval, concurrency):
 def notify(interval, concurrency):
   while True:
     start_time = now()
-    print('There are {} items in {} queue'.format( notifyQ._qsize(), 'notify' ))
+    # print('There are {} items in {} queue'.format( notifyQ._qsize(), 'notify' ))
     for i in range(notifyQ._qsize()):
       item = notifyQ.get()
-      # we can re-trigger alert
+      # First time, or re-trigger
       if item.triggered_sec <= 0:
         item.triggered_sec = item.repeatIntervalSecs
         print('triggered {} {} {}'.format(item.name, item.state, item.triggered_sec) )
@@ -76,7 +76,7 @@ def notify(interval, concurrency):
           pass
       # decrement trigger_sec untl we hit zero
       elif item.triggered_sec > 0:
-        print('waiting out {} {} {}'.format(item.name, item.state, item.triggered_sec) )
+        # print('waiting out {} {} {}'.format(item.name, item.state, item.triggered_sec) )
         item.triggered_sec -= interval
       # put back on pollQ with new values
       pollQ.put(item)
@@ -87,7 +87,7 @@ def notify(interval, concurrency):
 def resolve(interval, concurrency):
   while True:
     start_time = now()
-    print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
+    # print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
     for i in range(resolveQ._qsize()):
       item = resolveQ.get()
       print('resolving {}'.format(item.name))
@@ -125,7 +125,7 @@ def main():
 
 if __name__ == '__main__':
 
-  INTERVAL = 10
+  INTERVAL = 1
   CONCURRENCY = 10
 
   client = Client('')
