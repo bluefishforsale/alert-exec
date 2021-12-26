@@ -34,12 +34,12 @@ def update_state(item, value):
   return item
 
 
-#  worker 1/3 : collect and compare
-def poll(interval, concurrency):
+def poll():
+  """ Worker 1/3 : collect update and compare. Put alert in notifyQ"""
   while True:
     start_time = now()
-    # print('there are {} items in {} queue'.format( pollQ._qsize(), 'poll' ))
-    for i in range(pollQ._qsize()):
+    # print('there are {} items in {} queue'.format( pollQ.qsize(), 'poll' ))
+    for i in range(pollQ.qsize()):
       item = pollQ.get()
       # get numeric value from API
       try:
@@ -55,16 +55,16 @@ def poll(interval, concurrency):
         continue
       # back to the end of the line
       pollQ.put(item)
-    sleep(interval - (now() - start_time))
+    sleep(INTERVAL - (now() - start_time))
  
 
 
-# worker 2/3 : raise notifications
-def notify(interval, concurrency):
+def notify():
+  """ worker 2/3 : Send notifications. Manage cool-down timer """
   while True:
     start_time = now()
-    # print('There are {} items in {} queue'.format( notifyQ._qsize(), 'notify' ))
-    for i in range(notifyQ._qsize()):
+    # print('There are {} items in {} queue'.format( notifyQ.qsize(), 'notify' ))
+    for i in range(notifyQ.qsize()):
       item = notifyQ.get()
       # First time, or re-trigger
       if item.triggered_sec <= 0:
@@ -77,14 +77,14 @@ def notify(interval, concurrency):
       # decrement trigger_sec untl we hit zero
       elif item.triggered_sec > 0:
         # print('waiting out {} {} {}'.format(item.name, item.state, item.triggered_sec) )
-        item.triggered_sec -= interval
+        item.triggered_sec -= INTERVAL
       # put back on pollQ with new values
       pollQ.put(item)
-    sleep(interval - (now() - start_time))
+    sleep(INTERVAL - (now() - start_time))
 
 
-# worker 3/3 : resolver
-def resolve(interval, concurrency):
+def resolve():
+  """ worker 3/3 : send resolution signals """
   while True:
     start_time = now()
     # print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
@@ -96,7 +96,7 @@ def resolve(interval, concurrency):
       except:
         pass
     # wait out the duration
-    sleep(interval - (now() - start_time))
+    sleep(INTERVAL - (now() - start_time))
 
 
 # The alert object, dynamically instantiate all class properties from creation dict
@@ -110,7 +110,7 @@ class Alert(object):
       setattr(self, key, data[key])
 
 
-def main():
+def main(CONCURRENCY):
   # The idea is to put messages into queue
   # And a worker pool calls the functions
   # producing messages in other queues
@@ -119,14 +119,22 @@ def main():
       [ pollQ.put(Alert(a)) for a in client.query_alerts() ]
     except:
       pass
-  # start all the threads
-  [ Thread(target=eval(worker), kwargs={'interval': INTERVAL, 'concurrency': CONCURRENCY}).start() for worker in [ 'poll', 'notify', 'resolve' ]]
+  # sanity check on the concurrency
+  if CONCURRENCY >= pollQ.qsize():
+    # upper clamp to queue size
+    CONCURRENCY = pollQ.qize()
+  elif CONCURRENCY <= 0:
+    CONCURRENCY = 1
+  for N in range(1, CONCURRENCY):
+    for worker in [ 'poll', 'notify', 'resolve' ]:
+      # start all the threads
+      Thread(target=eval(worker), name="%s%03d".format(worker, N), kwargs={}).start() 
 
 
 if __name__ == '__main__':
 
   INTERVAL = 1
-  CONCURRENCY = 10
+  CONCURRENCY = 4
 
   client = Client('')
   pollQ = Queue()
@@ -134,6 +142,6 @@ if __name__ == '__main__':
   resolveQ = Queue()
 
   try:
-    main()
+    main(CONCURRENCY)
   except KeyboardInterrupt:
     sys.exit('Ctrl-C pressed ...')
