@@ -1,8 +1,11 @@
+#!env python3
+
 from client import Client
 from math import floor
 from queue import Queue
 from threading import Thread
 from time import time, sleep
+import signal
 import sys
 
 
@@ -18,10 +21,10 @@ def update_state(item, value):
     item.triggered_sec = 0
   # WARNING (greater than warn thresh, less than or equal to critical)
   if value > item.warn['value']:
-    state = item.warn['message'].upper()
+    state = item.warn['message']
   # CRITICAL (greater than critital)
   if value > item.critical['value']:
-    state = item.critical['message'].upper()
+    state = item.critical['message']
   # here we catch the change back from non pass to pass
   if item.state != state:
     if state == "PASS":
@@ -32,7 +35,7 @@ def update_state(item, value):
 
 
 #  worker 1/3 : collect and compare
-def poll(interval):
+def poll(interval, concurrency):
   while True:
     start_time = now()
     # print('there are {} items in {} queue'.format( pollQ._qsize(), 'poll' ))
@@ -57,14 +60,14 @@ def poll(interval):
 
 
 # worker 2/3 : raise notifications
-def notify(interval):
+def notify(interval, concurrency):
   while True:
     start_time = now()
     print('There are {} items in {} queue'.format( notifyQ._qsize(), 'notify' ))
     for i in range(notifyQ._qsize()):
       item = notifyQ.get()
       # we can re-trigger alert
-      if item.triggered_sec == 0:
+      if item.triggered_sec <= 0:
         item.triggered_sec = item.repeatIntervalSecs
         print('triggered {} {} {}'.format(item.name, item.state, item.triggered_sec) )
         try:
@@ -72,7 +75,7 @@ def notify(interval):
         except:
           pass
       # decrement trigger_sec untl we hit zero
-      if item.triggered_sec > 0:
+      elif item.triggered_sec > 0:
         print('waiting out {} {} {}'.format(item.name, item.state, item.triggered_sec) )
         item.triggered_sec -= interval
       # put back on pollQ with new values
@@ -81,7 +84,7 @@ def notify(interval):
 
 
 # worker 3/3 : resolver
-def resolve(interval):
+def resolve(interval, concurrency):
   while True:
     start_time = now()
     print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
@@ -117,11 +120,14 @@ def main():
     except:
       pass
   # start all the threads
-  [ Thread(target=eval(worker), kwargs={'interval': INTERVAL}).start() for worker in [ 'poll', 'notify', 'resolve' ]]
+  [ Thread(target=eval(worker), kwargs={'interval': INTERVAL, 'concurrency': CONCURRENCY}).start() for worker in [ 'poll', 'notify', 'resolve' ]]
 
 
 if __name__ == '__main__':
+
   INTERVAL = 10
+  CONCURRENCY = 10
+
   client = Client('')
   pollQ = Queue()
   notifyQ = Queue()
@@ -130,4 +136,4 @@ if __name__ == '__main__':
   try:
     main()
   except KeyboardInterrupt:
-    sys.exit('Exiting...')
+    sys.exit('Ctrl-C pressed ...')
