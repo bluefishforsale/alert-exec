@@ -7,6 +7,7 @@ from threading import Thread
 from time import time, sleep
 import signal
 import sys
+import argparse
 
 
 def now():
@@ -14,6 +15,7 @@ def now():
 
 
 def update_state(item, value, resolveQ):
+  """ Compare the numeric value with the alert set-points """
   state = None
   triggered_sec = item.triggered_sec
   # PASS (less than or equal to warn thresh)
@@ -29,7 +31,7 @@ def update_state(item, value, resolveQ):
   # here we catch the change back from non-pass to pass
   if item.state != state:
     if state == "PASS":
-      # print('resolving {}'.format(item.name))
+      # here is the resolve
       resolveQ.put(item)
   return (state, triggered_sec)
 
@@ -41,22 +43,22 @@ def poll(N):
   resolveQ = queues[f"resolve{N:03}"]
   while True:
     start_time = now()
-    # print('there are {} items in {} queue'.format( pollQ.qsize(), 'poll' ))
     for i in range(pollQ.qsize()):
       item = pollQ.get()
       # get numeric value from API
       try:
         resp = client.query(item.query)
-        # trasnslate numeric to string, store in state
+        # trasnslate numeric to string, and update triggered_sec
         item.state, item.triggered_sec = update_state(item, resp, resolveQ)
         # if not pass, stick in notify queue
         if item.state != 'PASS':
-          # print(f"Poll{N:003} Adding {item.name} {item.state} {resp}")
+          # Add the alert item to the notification queue
+          # don't worry about re-triggers, thats what triggered_sec is for
           notifyQ.put(item, resolveQ)
           continue
       except:
         pass
-      # back to the end of the line
+      # Add alert back to the end of the line
       pollQ.put(item)
     sleep(INTERVAL - (now() - start_time))
  
@@ -80,7 +82,6 @@ def notify(N):
           client.notify(item.name, item.state)
         # check if within repeatIntervalSecs window
         elif item.triggered_sec + item.repeatIntervalSecs >= time():
-          # print(f"Notify{N:003} waiting {item.name} {item.state} {time() - item.triggered_sec}")
           pass
         # put back on pollQ with new values
       except:
@@ -161,9 +162,15 @@ def main(CONCURRENCY):
 
 
 if __name__ == '__main__':
+  parser = argparse.ArgumentParser()
+  parser.add_argument("-c", "--concurrency", help="alerting concurrency",
+                    type=int, default=1)
+  parser.add_argument("-i", "--interval", help="poll interval",
+                    type=int, default=1)
+  args = parser.parse_args()
 
-  INTERVAL = 1
-  CONCURRENCY = 4
+  INTERVAL = args.interval
+  CONCURRENCY = args.concurrency
   client = Client('')
   queues = {}
 
