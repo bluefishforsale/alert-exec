@@ -1,7 +1,7 @@
 #!env python3
 
 from client import Client
-from math import floor
+from math import floor, ceil
 from queue import Queue
 from threading import Thread
 from time import time, sleep
@@ -13,29 +13,32 @@ def now():
   return time()
 
 
-def update_state(item, value):
+def update_state(item, value, resolveQ):
   state = None
+  triggered_sec = item.triggered_sec
   # PASS (less than or equal to warn thresh)
   if value <= item.warn['value']:
     state = 'PASS'
-    item.triggered_sec = 0
+    triggered_sec = 0
   # WARNING (greater than warn thresh, less than or equal to critical)
   if value > item.warn['value']:
     state = item.warn['message']
   # CRITICAL (greater than critital)
   if value > item.critical['value']:
     state = item.critical['message']
-  # here we catch the change back from non pass to pass
+  # here we catch the change back from non-pass to pass
   if item.state != state:
     if state == "PASS":
-      print('resolving {}'.format(item.name))
+      # print('resolving {}'.format(item.name))
       resolveQ.put(item)
-  item.state = state
-  return item
+  return (state, triggered_sec)
 
 
-def poll():
+def poll(N):
   """ Worker 1/3 : collect update and compare. Put alert in notifyQ"""
+  pollQ = queues[f"poll{N:03}"]
+  notifyQ = queues[f"notify{N:03}"]
+  resolveQ = queues[f"resolve{N:03}"]
   while True:
     start_time = now()
     # print('there are {} items in {} queue'.format( pollQ.qsize(), 'poll' ))
@@ -44,53 +47,58 @@ def poll():
       # get numeric value from API
       try:
         resp = client.query(item.query)
+        # trasnslate numeric to string, store in state
+        item.state, item.triggered_sec = update_state(item, resp, resolveQ)
+        # if not pass, stick in notify queue
+        if item.state != 'PASS':
+          # print(f"Poll{N:003} Adding {item.name} {item.state} {resp}")
+          notifyQ.put(item, resolveQ)
+          continue
       except:
-        break
-      # trasnslate numeric to string, store in state
-      item = update_state(item, resp)
-      # if not pass, stick in notify queue
-      if item.state != 'PASS':
-        # print("Adding {} {} {}".format(item.name, item.state, resp) )
-        notifyQ.put(item)
-        continue
+        pass
       # back to the end of the line
       pollQ.put(item)
     sleep(INTERVAL - (now() - start_time))
  
 
 
-def notify():
+def notify(N):
   """ worker 2/3 : Send notifications. Manage cool-down timer """
+  pollQ = queues[f"poll{N:03}"]
+  notifyQ = queues[f"notify{N:03}"]
   while True:
     start_time = now()
     # print('There are {} items in {} queue'.format( notifyQ.qsize(), 'notify' ))
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
       # First time, or re-trigger
-      if item.triggered_sec <= 0:
-        item.triggered_sec = item.repeatIntervalSecs
-        print('triggered {} {} {}'.format(item.name, item.state, item.triggered_sec) )
-        try:
+      try:
+        # values of 0, or repeatIntervalSecs seconds elapsed
+        if item.triggered_sec + item.repeatIntervalSecs <= time():
+          item.triggered_sec = time()
+          print(f"Notify{N:003} triggered {item.name} {item.state} at time {item.triggered_sec}")
           client.notify(item.name, item.state)
-        except:
+        # check if within repeatIntervalSecs window
+        elif item.triggered_sec + item.repeatIntervalSecs >= time():
+          # print(f"Notify{N:003} waiting {item.name} {item.state} {time() - item.triggered_sec}")
           pass
-      # decrement trigger_sec untl we hit zero
-      elif item.triggered_sec > 0:
-        # print('waiting out {} {} {}'.format(item.name, item.state, item.triggered_sec) )
-        item.triggered_sec -= INTERVAL
-      # put back on pollQ with new values
+        # put back on pollQ with new values
+      except:
+        pass
+      # back to the end of the line
       pollQ.put(item)
     sleep(INTERVAL - (now() - start_time))
 
 
-def resolve():
+def resolve(N):
   """ worker 3/3 : send resolution signals """
+  resolveQ = queues[f"resolve{N:03}"]
   while True:
     start_time = now()
     # print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
-    for i in range(resolveQ._qsize()):
+    for i in range(resolveQ.qsize()):
       item = resolveQ.get()
-      print('resolving {}'.format(item.name))
+      print(f"Resolve{N:003} sending for {item.name}")
       try:
         client.resolve(item.name)
       except:
@@ -114,32 +122,50 @@ def main(CONCURRENCY):
   # The idea is to put messages into queue
   # And a worker pool calls the functions
   # producing messages in other queues
-  while pollQ.empty():
+
+  all_alerts = list()
+  while len(all_alerts) == 0:
     try:
-      [ pollQ.put(Alert(a)) for a in client.query_alerts() ]
+      all_alerts = client.query_alerts()
     except:
       pass
+
+  print(f"there are {len(all_alerts)} alerts")
   # sanity check on the concurrency
-  if CONCURRENCY >= pollQ.qsize():
-    # upper clamp to queue size
-    CONCURRENCY = pollQ.qize()
-  elif CONCURRENCY <= 0:
+  if CONCURRENCY <= 0:
     CONCURRENCY = 1
-  for N in range(1, CONCURRENCY):
-    for worker in [ 'poll', 'notify', 'resolve' ]:
-      # start all the threads
-      Thread(target=eval(worker), name="%s%03d".format(worker, N), kwargs={}).start() 
+  workers = [ 'poll', 'notify', 'resolve' ]
+  
+  for N in range(0, CONCURRENCY):
+    # make the concurrent isolated  queues
+    for worker in workers:
+      # print(f"creating Queue {worker}{N:03}")
+      queues[f"{worker}{N:03}"] = Queue()
+    # [ queues[f"{worker}{N:03}"] = Queue() for worker in workers ]
+
+  for i in range(len(all_alerts)):
+    for N in range(0, CONCURRENCY):
+      # add alerts to each poll queue fairly
+      try:
+        a =all_alerts.pop()
+        # print(f"adding {a['name']} to PollQ{N:03}")
+        queues[f"poll{N:03}"].put(Alert(a))
+      except:
+        break
+
+  for N in range(0, CONCURRENCY):
+    for worker in workers:
+      # start all the threads and pass their concurrency queue number
+      # print(f"starting {worker}{N:03}")
+      Thread(target=eval(worker), name=f"{worker}{N:03}", args=[N]).start() 
 
 
 if __name__ == '__main__':
 
   INTERVAL = 1
   CONCURRENCY = 4
-
   client = Client('')
-  pollQ = Queue()
-  notifyQ = Queue()
-  resolveQ = Queue()
+  queues = {}
 
   try:
     main(CONCURRENCY)
