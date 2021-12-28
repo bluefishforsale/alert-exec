@@ -1,17 +1,12 @@
 #!env python3
 
 from client import Client
-from math import floor, ceil
 from queue import Queue
 from threading import Thread
 from time import time, sleep
-import signal
+import logging
 import sys
 import argparse
-
-
-def now():
-  return time()
 
 
 def update_state(item, value, resolveQ):
@@ -42,7 +37,7 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
   while True:
-    start_time = now()
+    start_time = time()
     for i in range(pollQ.qsize()):
       item = pollQ.get()
       # get numeric value from API
@@ -54,13 +49,14 @@ def poll(N):
         if item.state != 'PASS':
           # Add the alert item to the notification queue
           # don't worry about re-triggers, thats what triggered_sec is for
+          logging.debug(f"Worker poll{N:03} added {item.name} to notify{N:03}")
           notifyQ.put(item, resolveQ)
           continue
       except:
         pass
       # Add alert back to the end of the line
       pollQ.put(item)
-    sleep(INTERVAL - (now() - start_time))
+    sleep(INTERVAL - (time() - start_time))
  
 
 
@@ -69,8 +65,8 @@ def notify(N):
   pollQ = queues[f"poll{N:03}"]
   notifyQ = queues[f"notify{N:03}"]
   while True:
-    start_time = now()
-    # print('There are {} items in {} queue'.format( notifyQ.qsize(), 'notify' ))
+    start_time = time()
+    logging.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
       # First time, or re-trigger
@@ -78,7 +74,7 @@ def notify(N):
         # values of 0, or repeatIntervalSecs seconds elapsed
         if item.triggered_sec + item.repeatIntervalSecs <= time():
           item.triggered_sec = time()
-          print(f"Notify{N:003} triggered {item.name} {item.state} at time {item.triggered_sec}")
+          logging.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
           client.notify(item.name, item.state)
         # check if within repeatIntervalSecs window
         elif item.triggered_sec + item.repeatIntervalSecs >= time():
@@ -88,24 +84,24 @@ def notify(N):
         pass
       # back to the end of the line
       pollQ.put(item)
-    sleep(INTERVAL - (now() - start_time))
+    sleep(INTERVAL - (time() - start_time))
 
 
 def resolve(N):
   """ worker 3/3 : send resolution signals """
   resolveQ = queues[f"resolve{N:03}"]
   while True:
-    start_time = now()
-    # print('there are {} items in {} queue'.format( resolveQ._qsize(), 'resolve' ))
+    start_time = time()
+    logging.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
     for i in range(resolveQ.qsize()):
       item = resolveQ.get()
-      print(f"Resolve{N:003} sending for {item.name}")
+      logging.info(f"Worker resolve{N:03} resolving for {item.name}")
       try:
         client.resolve(item.name)
       except:
         pass
     # wait out the duration
-    sleep(INTERVAL - (now() - start_time))
+    sleep(INTERVAL - (time() - start_time))
 
 
 # The alert object, dynamically instantiate all class properties from creation dict
@@ -131,50 +127,72 @@ def main(CONCURRENCY):
     except:
       pass
 
-  print(f"there are {len(all_alerts)} alerts")
+  logging.info(f"There are {len(all_alerts)} total alerts being watched")
   # sanity check on the concurrency
   if CONCURRENCY <= 0:
     CONCURRENCY = 1
   workers = [ 'poll', 'notify', 'resolve' ]
   
+  # make the concurrent isolated  queues
   for N in range(0, CONCURRENCY):
-    # make the concurrent isolated  queues
     for worker in workers:
-      # print(f"creating Queue {worker}{N:03}")
+      logging.debug(f"creating Queue {worker}{N:03}")
       queues[f"{worker}{N:03}"] = Queue()
     # [ queues[f"{worker}{N:03}"] = Queue() for worker in workers ]
 
+  # add alerts to each poll queue fairly
   for i in range(len(all_alerts)):
     for N in range(0, CONCURRENCY):
-      # add alerts to each poll queue fairly
-      try:
-        a =all_alerts.pop()
-        # print(f"adding {a['name']} to PollQ{N:03}")
+      if len(all_alerts) > 0:
+        a = all_alerts.pop()
+        logging.debug(f"adding {a['name']} to PollQ{N:03}")
         queues[f"poll{N:03}"].put(Alert(a))
-      except:
-        break
 
+  # start all the threads and pass their concurrency queue number
   for N in range(0, CONCURRENCY):
     for worker in workers:
-      # start all the threads and pass their concurrency queue number
-      # print(f"starting {worker}{N:03}")
+      logging.debug(f"starting {worker}{N:03}")
       Thread(target=eval(worker), name=f"{worker}{N:03}", args=[N]).start() 
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser()
-  parser.add_argument("-c", "--concurrency", help="alerting concurrency",
+
+
+  parser = argparse.ArgumentParser(
+    prog='alert-exec',
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter
+  )
+  parser.add_argument("-c", "--concurrency", help="worker concurrency",
                     type=int, default=1)
   parser.add_argument("-i", "--interval", help="poll interval",
                     type=int, default=1)
+  parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
+                    type=str, default="info")
   args = parser.parse_args()
+
+  levels = {
+    'critical': logging.CRITICAL,
+    'error': logging.ERROR,
+    'warn': logging.WARNING,
+    'warning': logging.WARNING,
+    'info': logging.INFO,
+    'debug': logging.DEBUG
+  }
+
+  level = levels.get(args.log.lower())
+  logging.basicConfig(format='%(asctime)s %(message)s', level=level)
 
   INTERVAL = args.interval
   CONCURRENCY = args.concurrency
-  client = Client('')
+
   queues = {}
+  client = Client('')
+
+  # helpfun runtime banner
+  logging.info(f"Running Alert-Exec with {CONCURRENCY} workers on a {INTERVAL}s Timer")
+  logging.info("Press Ctrl-C to exit")
 
   try:
-    main(CONCURRENCY)
+    exit(main(CONCURRENCY))
   except KeyboardInterrupt:
     sys.exit('Ctrl-C pressed ...')
