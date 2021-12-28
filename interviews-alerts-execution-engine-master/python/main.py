@@ -54,6 +54,7 @@ def poll(N):
           if new_state == 'PASS':
             # reset triggered sec
             item.triggered_sec = 0
+            item.state = new_state
             logger.debug(f"Worker poll{N:03} added {item.name} to resolveQ{N:03}")
             resolveQ.put(item)
       # ugly hack pt2
