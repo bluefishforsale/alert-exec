@@ -38,11 +38,22 @@ The concept is that of three message queues (python Queues) where worker threads
 * start {N} goups of the worker thread types
 
 ### Thread and Queue interaction
+
 This operation flow is repeated horizontally {N} times in parallel
-1. Poll thread gets an Alert from global queues dict, key poll{N:03}
-1. Poll thread calls the alert server for a value for the Alert.query
-1. Poll thread adds the Alert ojbect to the Notification queue, or the Resolve queue
-1. 
+
+  ### Polling
+  1. Poll thread gets an Alert from global queues dict, key poll{N:03}
+  1. Poll thread calls the alert server for a value for the Alert.query
+  1. Poll thread adds the Alert ojbect to the Notification queue, or the Resolve queue
+  1. Poll thread repeats this loop sequentially for all items in the pollQ
+  1. Poll thread then sleeps for the remainder of the INTERVAL cycle
+
+  ### Notification
+  1. Notify thread 
+  1. Notify thread 
+
+
+
 
 
 # Trade-offs
