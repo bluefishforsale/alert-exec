@@ -189,15 +189,10 @@ if __name__ == '__main__':
   level = levels.get(args.log.lower())
   
   # logging setup
-  # format = logging.Formatter('%(asctime)s (%(pathname)s:%(lineno)d) [%(levelname)s] %(message)s')
   format = '%(asctime)s (%(pathname)s:%(lineno)d) [%(levelname)s] %(message)s'
   logger = logging.getLogger(__name__)
-  # logger.setFormatter(format)
   logging.basicConfig(format=format, level=level)
-  # handler = logging.StreamHandler()
-  # handler.setLevel(level)
-  # handler.setFormatter(format)
-  # logger.addHandler(handler)
+
 
   INTERVAL = args.interval
   CONCURRENCY = args.concurrency
