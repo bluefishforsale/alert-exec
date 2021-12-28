@@ -9,14 +9,7 @@ import sys
 import argparse
 
 
-def zero_or_val(val):
-  if val < 0:
-    return 0
-  else:
-    return val
-
-
-def val2state(item, value):
+def update_state(item, value):
   """ Compare the numeric value with the alert set-points """
   state = None
   # PASS (less than or equal to warn thresh)
@@ -36,76 +29,54 @@ def poll(N):
   pollQ = queues[f"poll{N:03}"]
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
-
-  # run forever
   while True:
     start_time = time()
-    i_sleep = (INTERVAL / (pollQ.qsize()+1))
     for i in range(pollQ.qsize()):
-      # get item from queue
       item = pollQ.get()
       logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
-
-      # catch unavailable backends
+      # ugly hack
       try:
         # get numeric value from API
-        val = client.query(item.query)
-
-      except Exception as err :
-        logger.error(f"Worker poll{N:03} failed to query for {item.name}: {err}")
-        # add to back of line
-        pollQ.put(item)
-        sleep(zero_or_val(i_sleep - (time() - start_time)))
-        # we skip to next Alert
-        continue
-
-      # trasnslate numeric to string, and update triggered_sec
-      new_state = val2state(item, val)
-
-      # if not pass, stick in notify queue
-      if new_state != 'PASS':
-        logger.debug(f"Worker poll{N:03} added {item.name} to notifyQ{N:03}")
-        # update item state, reset timer
-        if item.state != new_state:
+        resp = client.query(item.query)
+        # trasnslate numeric to string, and update triggered_sec
+        old_state = item.state
+        new_state = update_state(item, resp)
+        # if not pass, stick in notify queue
+        if new_state != 'PASS':
+          # Add the alert item to the notification queue
+          # don't worry about re-triggers, thats what triggered_sec is for
+          logger.debug(f"Worker poll{N:03} added {item.name} to notifyQ{N:03}")
           item.state = new_state
-          item.triggered_sec == 0
-        # Add the alert item to the notification queue
-        # don't worry about re-triggers, thats what triggered_sec is for
-        notifyQ.put(item)
-        # do not put item on pollQ and skip to next item
-        continue
-
-      # here we catch the change back from non-pass to pass
-      elif new_state == 'PASS':
-        if item.state != new_state:
-          # reset triggered sec
-          item.triggered_sec = 0
-          # set state to new
-          item.state = new_state
-          logger.debug(f"Worker poll{N:03} added {item.name} to resolveQ{N:03}")
-          # put alert on resolve queue
-          resolveQ.put(item)
-
+          notifyQ.put(item, resolveQ)
+          continue
+        # here we catch the change back from non-pass to pass
+        elif new_state != old_state:
+          if new_state == 'PASS':
+            # reset triggered sec
+            item.triggered_sec = 0
+            item.state = new_state
+            logger.debug(f"Worker poll{N:03} added {item.name} to resolveQ{N:03}")
+            resolveQ.put(item)
+      # ugly hack pt2
+      except:
+        pass
       # Add alert back to the end of the line
       logger.debug(f"Worker poll{N:03} putting {item.name} back on pollQ{N:03}")
       pollQ.put(item)
-    sleep(zero_or_val(INTERVAL - (time() - start_time)))
+    sleep(INTERVAL - (time() - start_time))
+ 
 
 
 def notify(N):
   """ worker 2/3 : Send notifications. Manage cool-down timer """
   pollQ = queues[f"poll{N:03}"]
   notifyQ = queues[f"notify{N:03}"]
-
-  # run forever
   while True:
     start_time = time()
     logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
-
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
       # First time, or re-trigger
-
       try:
         # values of 0, or repeatIntervalSecs seconds elapsed
         if item.triggered_sec + item.repeatIntervalSecs <= time():
@@ -117,37 +88,31 @@ def notify(N):
           pass
         # put back on pollQ with new values
       except:
-        logger.error(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
-
+        pass
       # back to the end of the line
       pollQ.put(item)
-    sleep(zero_or_val(INTERVAL - (time() - start_time)))
+    sleep(INTERVAL - (time() - start_time))
 
 
 def resolve(N):
   """ worker 3/3 : send resolution signals """
   resolveQ = queues[f"resolve{N:03}"]
-
-  # run forever
   while True:
     start_time = time()
     logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
-
     for i in range(resolveQ.qsize()):
       item = resolveQ.get()
       logger.info(f"Worker resolve{N:03} resolving for {item.name}")
       try:
         client.resolve(item.name)
       except:
-        logger.error(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
         pass
-
     # wait out the duration
-    sleep(zero_or_val(INTERVAL - (time() - start_time)))
+    sleep(INTERVAL - (time() - start_time))
 
 
+# The alert object, dynamically instantiate all class properties from creation dict
 class Alert(object):
-  """ The alert object, dynamically instantiate all class properties from creation dict """
   def __init__(self, data):
     # new k,v
     self.state = 'PASS'
@@ -158,15 +123,17 @@ class Alert(object):
 
 
 def main(CONCURRENCY):
-  """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
+  # The idea is to put messages into queue
+  # And a worker pool calls the functions
+  # producing messages in other queues
 
   all_alerts = list()
   while len(all_alerts) == 0:
     try:
+      logger.info("populating all_alerts")
       all_alerts = client.query_alerts()
     except:
-      logging.error("Could not contact metrics source. Sleeping 30s")
-      sleep(30)
+      pass
 
   logger.info(f"There are {len(all_alerts)} total alerts being watched")
   # sanity check on the concurrency
@@ -175,7 +142,6 @@ def main(CONCURRENCY):
   elif CONCURRENCY >= len(all_alerts):
     CONCURRENCY == len(all_alerts)
 
-  # types of workers and queues
   workers = [ 'poll', 'notify', 'resolve' ]
   
   # make the concurrent isolated  queues
@@ -190,7 +156,7 @@ def main(CONCURRENCY):
     for N in range(0, CONCURRENCY):
       if len(all_alerts) > 0:
         a = all_alerts.pop()
-        logger.debug(f"PollQ{N:03} adding {a}")
+        logger.debug(f"adding {a['name']} to PollQ{N:03}")
         queues[f"poll{N:03}"].put(Alert(a))
 
   # start all the threads and pass their concurrency queue number
@@ -201,7 +167,6 @@ def main(CONCURRENCY):
 
 
 if __name__ == '__main__':
-  """ Called directly or imported? """
   parser = argparse.ArgumentParser(
     prog='alert-exec',
     formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -229,16 +194,10 @@ if __name__ == '__main__':
   logger = logging.getLogger(__name__)
   logging.basicConfig(format=format, level=level)
 
-  # interval limits
+
   INTERVAL = args.interval
   CONCURRENCY = args.concurrency
-  if INTERVAL <= 0:
-    INTERVAL = 1
-  elif INTERVAL > 3600:
-    INTERVAL = 3600
 
-
-  # required globals
   queues = {}
   client = Client('')
 

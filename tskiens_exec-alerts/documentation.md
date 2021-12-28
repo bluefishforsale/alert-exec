@@ -26,15 +26,9 @@ optional arguments:
   -l LOG, --log LOG     logging level eg. [critical, error, warn, warning, info, debug]
 ```
 
-### Options details
-The script can be run in a paralell mode. This divides up the alerts into fair'ish buckets for polling and notifying. Will not allow settings below 1, and above the length of the alerts list.
-
-The script supports scraping intervals. Default value of 1, and safety clamps of 1sec and 3600sec limit.
-
-Common Logging levels are supported. Debug will show all queue operations. Default is info. 
 
 ## Architecture
-This script is a run-till-die affair.
+This script is a run-till-die effort. 
 
 The concept is that of three message queues (python Queues) where worker threads pull Alert objects from them then wait for the next cycle
 
@@ -85,6 +79,7 @@ This operation flow is repeated horizontally {N} times in parallel
 
 
 
+
 # Trade-offs
 Globals: the concurrency mechanism chosen uses a global dictionary to hold the queues for each worker type. This makes the code less atomic and more inter-dependant. Creates a frustrating case for unit tests as the "secret sauce" must be  hand-written. 
 
@@ -93,16 +88,3 @@ Alert Class as dict with no methods: Kind of a sloppt abuse of a class here, but
 Gathering the metrics list once and only once: This was not ideal, and I would have preferred something more fault tolerant. However due to the limitations of time I opted to aspiure for the minimum requirements.
 
 Module level Logging not implemented. TBH I just could not get it working right. I opted for verbose instead of nothing. ideally I'd use a log handler, and streams so I could silence the requests module, or have that on it's own argument. 
-
-Fragile / Unavailable backends. The implementation tries to be tolerant of backends which are sporatically unavailable through the use of try/except blocks around those calls and logging of the messages. Should the inital alerts gather at start fail, then the script waits until that endpoint is able to provide the needed data.
-
-There is very little sanitization and key checking of data returned from the client. Should the format change, this will undoubtedly break the script.
-
-The metrics backend does seem to have some rate-limits in place. I have been able to take it offline through too many concurrent queries. I have noticed that it will resume operation after some time. This leads me to think the rate limit is implemented as a sliding window bucket. I have made not accomodation for this
-
-Seen in my logging as:
-```
-2021-12-28 15:49:54,429 (./main.py:54) [ERROR] Worker poll003 failed to query for alert-3: could not complete request got 500
-```
-
-I tried to implement a spreading flow, dividing the (interval / alert number+1). In hopes this would alow for a smoother calling of the backend. Even with concurrency of 1 and interval of 4s, I still saw 500's from the metrics backend.  The happiest interval / concurrency achieved was 15s / 1 worker
