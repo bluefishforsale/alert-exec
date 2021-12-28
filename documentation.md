@@ -39,9 +39,10 @@ The concept is that of three message queues (python Queues) where worker threads
 
 ### Thread and Queue interaction
 This operation flow is repeated horizontally {N} times in parallel
-1. Thread poll{N} gets an Alert from global queues dict, key poll{N:03}
-1. Thread poll{N} calls the alert server for a value for the Alert.query
-1. Thread poll{N} adds the Alert ojbect to the Notification queue (direct), or the Resolve queue (indirect)
+1. Poll thread gets an Alert from global queues dict, key poll{N:03}
+1. Poll thread calls the alert server for a value for the Alert.query
+1. Poll thread adds the Alert ojbect to the Notification queue, or the Resolve queue
+1. 
 
 
 # Trade-offs
@@ -50,5 +51,3 @@ Globals: the concurrency mechanism chosen uses a global dictionary to hold the q
 Alert Class as dict with no methods: Kind of a sloppt abuse of a class here, but the alternative trade-off was a global dict, or list of dicts. The attribute reference of classes was a slightly nicer syntax and allows for easier testing.
 
 Gathering the metrics list once and only once: This was not ideal, and I would have preferred something more fault tolerant. However due to the limitations of time I opted to aspiure for the minimum requirements.
-
-Resolution of items happens from within a function called by the poll worker thread. I would have liked to kept both  notification and poll queue addi 
