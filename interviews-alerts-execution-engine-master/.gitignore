@@ -1,5 +1,8 @@
+**/*.pyc
 **/*.zip
 .idea/
-venv/
+venv/*
+golang/**
+java/**
 python/__pycache__/
-tskiens_exec-alerts/
+tskiens_exec-alerts/*
