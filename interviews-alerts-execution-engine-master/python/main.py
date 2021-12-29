@@ -4,9 +4,21 @@ from client import Client
 from queue import Queue
 from threading import Thread
 from time import time, sleep
+from math import floor
 import logging
 import sys
 import argparse
+
+
+class Alert(object):
+  """ The alert object, dynamically instantiate all class properties from creation dict """
+  def __init__(self, data):
+    # new k,v
+    self.state = 'PASS'
+    self.triggered_sec = 0
+    # all passed in k,v
+    for key in data:
+      setattr(self, key, data[key])
 
 
 def zero_or_val(val):
@@ -40,11 +52,19 @@ def poll(N):
   # run forever
   while True:
     start_time = time()
-    i_sleep = (INTERVAL / (pollQ.qsize()+1))
+    i_sleep = (INTERVAL / (pollQ.qsize()))
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
       logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
+
+      # Check for intervalSecs
+      # Allows for changing interval
+      if not floor(time() % item.intervalSecs) <= INTERVAL:
+        # back on the stack
+        pollQ.put(item)
+        # skip to next item
+        continue
 
       # catch unavailable backends
       try:
@@ -52,7 +72,7 @@ def poll(N):
         val = client.query(item.query)
 
       except Exception as err :
-        logger.error(f"Worker poll{N:03} failed to query for {item.name}: {err}")
+        logger.warning(f"Worker poll{N:03} failed to query for {item.name}: {err}")
         # add to back of line
         pollQ.put(item)
         sleep(zero_or_val(i_sleep - (time() - start_time)))
@@ -117,7 +137,7 @@ def notify(N):
           pass
         # put back on pollQ with new values
       except:
-        logger.error(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
+        logger.warning(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
 
       # back to the end of the line
       pollQ.put(item)
@@ -139,25 +159,14 @@ def resolve(N):
       try:
         client.resolve(item.name)
       except:
-        logger.error(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
+        logger.warning(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
         pass
 
     # wait out the duration
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
 
-class Alert(object):
-  """ The alert object, dynamically instantiate all class properties from creation dict """
-  def __init__(self, data):
-    # new k,v
-    self.state = 'PASS'
-    self.triggered_sec = 0
-    # all passed in k,v
-    for key in data:
-      setattr(self, key, data[key])
-
-
-def main(CONCURRENCY):
+def main(INTERVAL, CONCURRENCY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
@@ -169,11 +178,21 @@ def main(CONCURRENCY):
       sleep(30)
 
   logger.info(f"There are {len(all_alerts)} total alerts being watched")
+
+  # sanity check on the interval
+  if INTERVAL <= 0:
+    INTERVAL = 1
+  elif INTERVAL > 15:
+    INTERVAL = 15
   # sanity check on the concurrency
   if CONCURRENCY <= 0:
     CONCURRENCY = 1
   elif CONCURRENCY >= len(all_alerts):
-    CONCURRENCY == len(all_alerts)
+    CONCURRENCY = len(all_alerts)
+
+  # helpfun runtime banner
+  logger.info(f"Running Alert-Exec with {CONCURRENCY} workers on a {INTERVAL}s Timer")
+  logger.info("Press Ctrl-C to exit")
 
   # types of workers and queues
   workers = [ 'poll', 'notify', 'resolve' ]
@@ -207,9 +226,9 @@ if __name__ == '__main__':
     formatter_class=argparse.ArgumentDefaultsHelpFormatter
   )
   parser.add_argument("-c", "--concurrency", help="worker concurrency",
-                    type=int, default=1)
-  parser.add_argument("-i", "--interval", help="poll interval",
-                    type=int, default=1)
+                    type=int, default=2)
+  parser.add_argument("-i", "--interval", help="internal operation interval. max 15",
+                    type=int, default=2)
   parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
                     type=str, default="info")
   args = parser.parse_args()
@@ -225,28 +244,19 @@ if __name__ == '__main__':
   level = levels.get(args.log.lower())
   
   # logging setup
-  format = '%(asctime)s (%(pathname)s:%(lineno)d) [%(levelname)s] %(message)s'
+  format = '%(asctime)-30s %(levelname)-8s %(pathname)s:%(lineno)-21d %(message)s'
   logger = logging.getLogger(__name__)
   logging.basicConfig(format=format, level=level)
 
   # interval limits
   INTERVAL = args.interval
   CONCURRENCY = args.concurrency
-  if INTERVAL <= 0:
-    INTERVAL = 1
-  elif INTERVAL > 3600:
-    INTERVAL = 3600
-
 
   # required globals
   queues = {}
   client = Client('')
 
-  # helpfun runtime banner
-  logger.info(f"Running Alert-Exec with {CONCURRENCY} workers on a {INTERVAL}s Timer")
-  logger.info("Press Ctrl-C to exit")
-
   try:
-    exit(main(CONCURRENCY))
+    exit(main(INTERVAL, CONCURRENCY))
   except KeyboardInterrupt:
     sys.exit('Ctrl-C pressed ...')
