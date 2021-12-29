@@ -1,3 +1,5 @@
+**/*.zip
 .idea/
 venv/
 python/__pycache__/
+tskiens_exec-alerts/
