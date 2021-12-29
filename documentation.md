@@ -61,6 +61,7 @@ This operation flow is repeated horizontally {N} times in parallel
   1. Thread iterates over the poll queue once, then waits
   1. Gets an Alert from global queues dict, key poll{N:03}
   1. Respect intervalSecs in the item, and only poll if it's time
+  1. Retry logic here
   1. Calls the alert server for a value for the Alert.query
   1. Adds the Alert ojbect to the Notification queue then skips to the next Alert object
   1. Adds a copy of the Alert ojbect to the the Resolve queue
@@ -72,6 +73,7 @@ This operation flow is repeated horizontally {N} times in parallel
   1. Notifier thread is forever running
   1. Each notifer thread knows of two queues (pollQ, notifyQ). Identified by their's numeric ID's
   1. Thread iterates over the notification queue once, then waits
+  1. Retry logic here
   1. Respect repeatInterval to determine if thread sends a message or waits. Using unix seconds + repeatInterval
   1. If logic allows, we call the notifications backend with the message. We also set the notification_sec attribute.
   1. If logic forbids, we wait out the clock
@@ -83,6 +85,7 @@ This operation flow is repeated horizontally {N} times in parallel
   1. Resolver thread is forever running
   1. Each resolver thread knows of one queue (resolveQ), identified by it's numeric ID
   1. Thread iterates over the resolve queue once, then waits
+  1. Retry logic here
   1. Calls the resolve backend with the message
   1. Repeats this loop sequentially for all items in the resolveQ
   1. Then sleeps for the remainder of the INTERVAL cycle  
@@ -111,7 +114,8 @@ Seen in my logging as:
 2021-12-28 15:49:54,429 (./main.py:54) [ERROR] Worker poll003 failed to query for alert-3: could not complete request got 500
 ```
 
-Confirmed with fortio load-testing.
+Confirmed with fortio load-testing.s
+1.8% failures at the rate my script calls it.
 ```
 docker run --rm -p 8088:8088 fortio/fortio load -c 2 -t 300s  'http://192.168.1.220:9001/query?target=test-query-10'
 
@@ -135,6 +139,6 @@ Should the inital HTTP call to gather alerts fail; then the script waits until t
 
 Time-spread call for polling. Dividing the (interval / alert count+1) `i_sleep`. In hopes this would alow for a smoother calling of the backend. A later tweak added the inclusion of the elapsed time so far in the worker. This allowed for more even distribution of calls, more concurrent polling workers, and fewer backend 500's
 
-Opinionated internal scrape timer. I saw that the body returned from the metrics server had an intervalSec field. This was not in the requirements, but I liked the challenge of respecting this. I assumed this was to be the polling interval for the alert. I chose a different method than repeatIntervalSecs. Instead of capturing a timestamp and doing evaluation, I chose for this to modulo the current time with the items intervalSec then floor it. Knowing it would be some value between 0 and intervalSec. If the value is less than or eqal to the internal action interval, then we can poll it. 
+Opinionated `intervalSecs`. I saw that the body returned from the metrics server had an intervalSec field. I chose a different method than `repeatIntervalSecs`. Instead of capturing a timestamp and doing evaluation, I chose for this to modulo the current time with the items intervalSec then floor it. Knowing it would be some value between 0 and intervalSec. If the value is less than or eqal to the internal action interval, then we can poll it. 
 
-The internal action interval is like a resolution that things can happen on. A clock-work of sorts. It's used for polling and sleeping. It's also used to spread out polling using the `i_sleep` variable
+The `INTERVAL` option is an internal resolution timer that actions occur on. A clock-work of sorts. It's used for polling and sleeping. All actions start at the next tick of the timer, in all worker threads. I had a variant where each poller thread slept `N` and that `N` was also used to evaluate if polling would occur. This  It's also used to spread out polling using the `i_sleep` variable
