@@ -1,13 +1,13 @@
 #!env python3
 
 from client import Client
+from math import floor
 from queue import Queue
 from threading import Thread
 from time import time, sleep
-from math import floor
+import argparse
 import logging
 import sys
-import argparse
 
 
 class Alert(object):
@@ -60,7 +60,8 @@ def poll(N):
   # run forever
   while True:
     start_time = time()
-    i_sleep = (INTERVAL / (pollQ.qsize()))
+    logger.debug(f"Worker poll{N:03} there are {pollQ.qsize()} items in ueue poll{N:03}")
+    i_sleep = ( INTERVAL / pollQ.qsize() )
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
@@ -75,7 +76,7 @@ def poll(N):
       # catch unavailable backends
       # we give ourselves a few tries
       val = False
-      for attempt in range(3):
+      for attempt in range(RETRY):
         if not val:
           # get numeric value from API
           logger.debug(f"Worker poll{N:03} query attempt #{attempt} for {item.query}")
@@ -85,7 +86,7 @@ def poll(N):
           except Exception as err:
             logger.warning(f"Worker poll{N:03} failed query attempt #{attempt} for {item.name}: {err}")
             # slow down the retry just a little
-            sleep(zero_or_val(i_sleep) / 3)
+            sleep(zero_or_val(i_sleep / RETRY))
 
       # all attempts exhausted, skip to next 
       if not val:
@@ -137,6 +138,7 @@ def notify(N):
     start_time = time()
 
     for i in range(notifyQ.qsize()):
+      i_sleep = ( INTERVAL / notifyQ.qsize() )
       item = notifyQ.get()
 
       OK = False
@@ -144,7 +146,7 @@ def notify(N):
       # values of 0, or repeatIntervalSecs seconds elapsed
       if item.triggered_sec + item.repeatIntervalSecs < floor(time()):
         item.triggered_sec = floor(time())
-        for attempt in range(3):
+        for attempt in range(RETRY):
 
           if not OK:
             try:
@@ -155,7 +157,8 @@ def notify(N):
             # Problem, tell somebody
             except Exception as err:
               logger.warning(f"Worker notify{N:03} failed attempt #{attempt} for {item.name}: {err}")
-              continue
+              # slow down the retry just a little
+              sleep(zero_or_val(i_sleep / RETRY))
 
       # within repeatIntervalSecs window, log if debug
       elif item.triggered_sec + item.repeatIntervalSecs >= floor(time()):
@@ -175,24 +178,27 @@ def resolve(N):
     start_time = time()
 
     for i in range(resolveQ.qsize()):
+      i_sleep = ( INTERVAL / resolveQ.qsize() )
       item = resolveQ.get()
       OK = False
       # retry loop
-      for attempt in range(3):
+      for attempt in range(RETRY):
         # Skip if we've had a success
         if not OK:
           try:
             logger.info(f"Worker resolve{N:03} resolving attempt #{attempt} for {item.name}")
             client.resolve(item.name)
             OK = True
-          except:
+          except Exception as err:
             logger.warning(f"Worker resolve{N:03} failed attempt #{attempt} for {item.name}: {err}")
+            # slow down the retry just a little
+            sleep(zero_or_val(i_sleep / RETRY))
 
     # wait out the duration
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
 
-def main(INTERVAL, CONCURRENCY):
+def main(INTERVAL, CONCURRENCY, RETRY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
@@ -205,12 +211,19 @@ def main(INTERVAL, CONCURRENCY):
 
   logger.info(f"There are {len(all_alerts)} total alerts being watched")
 
-  # sanity check on the interval
+  # sanity check the retry
+  if RETRY <= 0:
+    RETRY = 1
+  elif RETRY > 10:
+    RETRY = 10
+
+  # sanity check the interval
   if INTERVAL <= 0:
     INTERVAL = 1
   elif INTERVAL > 15:
     INTERVAL = 15
-  # sanity check on the concurrency
+
+  # sanity check the concurrency
   if CONCURRENCY <= 0:
     CONCURRENCY = 1
   elif CONCURRENCY >= len(all_alerts):
@@ -218,6 +231,7 @@ def main(INTERVAL, CONCURRENCY):
 
   # helpfun runtime banner
   logger.info(f"Running Alert-Exec with {CONCURRENCY} workers on a {INTERVAL}s Timer")
+  logger.info(f"Alert-Exec using {RETRY} reties for HTTP backend")
   logger.info("Press Ctrl-C to exit")
 
   # types of workers and queues
@@ -254,7 +268,9 @@ if __name__ == '__main__':
   parser.add_argument("-c", "--concurrency", help="worker concurrency",
                     type=int, default=2)
   parser.add_argument("-i", "--interval", help="internal operation interval. max 15",
-                    type=int, default=2)
+                    type=int, default=1)
+  parser.add_argument("-r", "--retry", help="Failure retry count",
+                    type=int, default=3)
   parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
                     type=str, default="info")
   args = parser.parse_args()
@@ -274,15 +290,16 @@ if __name__ == '__main__':
   logger = logging.getLogger(__name__)
   logging.basicConfig(format=format, level=level)
 
-  # interval limits
-  INTERVAL = args.interval
+  # constants
   CONCURRENCY = args.concurrency
+  INTERVAL = args.interval
+  RETRY = args.retry
 
-  # required globals
+  # globals
   queues = {}
   client = Client('')
 
   try:
-    exit(main(INTERVAL, CONCURRENCY))
+    exit(main(INTERVAL, CONCURRENCY, RETRY))
   except KeyboardInterrupt:
     sys.exit('Ctrl-C pressed ...')
