@@ -97,9 +97,12 @@ Gathering the metrics list once and only once: This was not ideal, and I would h
 
 Module level Logging not implemented. TBH I just could not get it working right. I opted for verbose instead of nothing. ideally I'd use a log handler, and streams so I could silence the requests module, or have that on it's own argument. 
 
-Fragile / Unavailable backends. The implementation tries to be tolerant of backends which are sporatically unavailable through the use of try/except blocks around those calls and logging of the messages. Should the inital alerts gather at start fail, then the script waits until that endpoint is able to provide the needed data.
-
 There is very little sanitization and key checking of data returned from the client. Should the format change, this will undoubtedly break the script.
+
+Poll worker function is more complex than I'd like. I opted for this approach  as it's self-contained. I thought about helper functions each for a simple analsys and return, but had bigger problems to worry about. I got it working and moved on. It's durable and well documented, so it will be easy to fix later.
+
+# limitations of the backend
+
 
 The metrics backend does seem to have some rate-limits in place. I have been able to take it offline through too many concurrent queries. I have noticed that it will resume operation after some time. This leads me to think the rate limit is implemented as a sliding window bucket. I have made not accomodation for this
 
@@ -108,9 +111,29 @@ Seen in my logging as:
 2021-12-28 15:49:54,429 (./main.py:54) [ERROR] Worker poll003 failed to query for alert-3: could not complete request got 500
 ```
 
-Time-spread call for polling. Dividing the (interval / alert count+1) `i_sleep`. In hopes this would alow for a smoother calling of the backend. A later tweak added the inclusion of the elapsed time so far in the worker. This allowed for more even distribution of calls, more concurrent polling workers, and fewer backend 500's
+Confirmed with fortio load-testing.
+```
+docker run --rm -p 8088:8088 fortio/fortio load -c 2 -t 300s  'http://192.168.1.220:9001/query?target=test-query-10'
 
-Poll worker function is more complex than I'd like. I opted for this approach  as it's self-contained. I thought about helper functions each for a simple analsys and return, but had bigger problems to worry about. I got it working and moved on. It's durable and well documented, so it will be easy to fix later.
+Fortio 1.20.0 running at 20 queries per second, 6->6 procs, for 5m0s: http://192.168.1.220:9001/query?target=test-query-10
+18:11:02 I httprunner.go:81> Starting http test for http://192.168.1.220:9001/query?target=test-query-10 with 2 threads at 20.0 qps
+Starting at 20 qps with 2 thread(s) [gomax 6] for 5m0s : 3000 calls each (total 6000)
+
+Ended after 5m0.0040056s : 6000 calls. qps=20
+Sleep times : count 5998 avg 0.093999007 +/- 0.003372 min 0.019000967 max 0.098345044 sum 563.806043
+Aggregated Function Time : count 6000 avg 0.003876179 +/- 0.002669 min 0.0015637 max 0.0746449 sum 23.2570739
+
+Code 200 : 5930 (98.8 %)
+Code 500 : 70 (1.2 %)
+
+```
+
+#### Dealing with those limitations
+The implementation tries to be tolerant of backends which are sporatically unavailable through the use of try/except blocks around HTTP calls which could fail. Logging was used to spot this initially. Also for the poll / notify / resolve HTTP calls, a retry was implemented to ensure durability. It was noticed that if the first call failed, the second would succeed. A static retry count was used, but it could be made into an argument.
+
+Should the inital HTTP call to gather alerts fail; then the script waits until that endpoint is able to provide the needed data.
+
+Time-spread call for polling. Dividing the (interval / alert count+1) `i_sleep`. In hopes this would alow for a smoother calling of the backend. A later tweak added the inclusion of the elapsed time so far in the worker. This allowed for more even distribution of calls, more concurrent polling workers, and fewer backend 500's
 
 Opinionated internal scrape timer. I saw that the body returned from the metrics server had an intervalSec field. This was not in the requirements, but I liked the challenge of respecting this. I assumed this was to be the polling interval for the alert. I chose a different method than repeatIntervalSecs. Instead of capturing a timestamp and doing evaluation, I chose for this to modulo the current time with the items intervalSec then floor it. Knowing it would be some value between 0 and intervalSec. If the value is less than or eqal to the internal action interval, then we can poll it. 
 

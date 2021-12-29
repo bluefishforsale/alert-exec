@@ -4,8 +4,7 @@ from client import Client
 from queue import Queue
 from threading import Thread
 from time import time, sleep
-from math import floor, ceil
-import random
+from math import floor
 import logging
 import sys
 import argparse
@@ -23,10 +22,10 @@ class Alert(object):
 
 
 def zero_or_val(val):
-  """ Helper: no negative numbers. zero, or the input. """
-  if val > 0:
+  if val < 0:
+    return 0
+  else:
     return val
-  return 0
 
 
 def val2state(item, value):
@@ -50,31 +49,26 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
 
-  # each poll worker sleeps N seconds at start
-  # initial jitter, only done once per thread to stagger them
-  sleep(N)
-
   # run forever
   while True:
     start_time = time()
-    i_sleep = ( INTERVAL / (pollQ.qsize()*3) ) 
+    i_sleep = (INTERVAL / (pollQ.qsize()))
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
       # logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
 
-      # early exit from loop if it's not time to poll
-      # when time % interval == N : it's our turn
-      # this is a method of staggering the polling
-      if not floor(time() % item.intervalSecs) == N:
+      # Check for intervalSecs
+      # Allows for changing interval
+      if not floor(time() % item.intervalSecs) <= INTERVAL:
         # back on the stack
         pollQ.put(item)
         # skip to next item
         continue
 
-      val = False
       # catch unavailable backends
       # we give ourselves a few tries
+      val = False
       for attempt in range(3):
         if not val:
           # get numeric value from API
@@ -83,7 +77,7 @@ def poll(N):
           try:
             val = client.query(item.query)
           except Exception as err:
-            logger.warning(f"Worker poll{N:03} FAILED query attempt #{attempt} for {item.name}: {err}")
+            logger.warning(f"Worker poll{N:03} failed query attempt #{attempt} for {item.name}: {err}")
             # slow down the retry just a little
             sleep(zero_or_val(i_sleep) / 3)
 
@@ -91,6 +85,7 @@ def poll(N):
       if not val:
         # add to back of line
         pollQ.put(item)
+        sleep(zero_or_val(i_sleep - (time() - start_time)))
         # we skip to next Alert
         continue
 
@@ -105,10 +100,9 @@ def poll(N):
           item.state = new_state
           item.triggered_sec == 0
         # Add the alert item to the notification queue
-        # do not put item on pollQ and skip to next item
+        # don't worry about re-triggers, thats what triggered_sec is for
         notifyQ.put(item)
-        # Sleep a little so we don't ratchet the backend
-        sleep(zero_or_val(INTERVAL - (time() - start_time)))
+        # do not put item on pollQ and skip to next item
         continue
 
       # here we catch the change back from non-pass to pass
@@ -122,10 +116,9 @@ def poll(N):
           # put alert on resolve queue
           resolveQ.put(item)
 
-      logger.debug(f"Worker poll{N:03} putting {item.name} back on pollQ{N:03}")
       # Add alert back to the end of the line
+      logger.debug(f"Worker poll{N:03} putting {item.name} back on pollQ{N:03}")
       pollQ.put(item)
-    # Sleep a little so we don't ratchet the backend
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
 
@@ -142,26 +135,32 @@ def notify(N):
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
 
-      val = False
-      for attempt in range(3):
-        if not val:
-          # First time, or re-trigger
-          try:
-            # values of 0, or repeatIntervalSecs seconds elapsed
-            if item.triggered_sec + item.repeatIntervalSecs <= time():
-              item.triggered_sec = time()
-              logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
-              client.notify(item.name, item.state)s
-            # check if within repeatIntervalSecs window
-            elif item.triggered_sec + item.repeatIntervalSecs >= time():
-              logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
-            # if we made it here, post succeeded. set True so we don't resend
-            val = True
-          # Problem, tell somebody
-          except Exception as err:
-            logger.warning(f"Worker notify{N:03} FAILED attempt #{attempt} for {item.name}: {err}")
+      OK = False
+      # First time, or re-trigger
+      # values of 0, or repeatIntervalSecs seconds elapsed
+      if item.triggered_sec + item.repeatIntervalSecs < floor(time()):
+        item.triggered_sec = floor(time())
+        for attempt in range(3):
 
-     # put back on pollQ with new values
+          if not OK:
+            try:
+              logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
+              client.notify(item.name, item.state)
+
+            # Problem, tell somebody
+            except Exception as err:
+              logger.warning(f"Worker notify{N:03} failed attempt #{attempt} for {item.name}: {err}")
+              continue
+
+          # if we made it here, post succeeded. set True so we don't resend
+          OK = True
+
+      # check if within repeatIntervalSecs window
+      # We've already sent a trigger, so we wait.
+      elif item.triggered_sec + item.repeatIntervalSecs >= floor(time()):
+        logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
+
+      # put back on pollQ with new values
       pollQ.put(item)
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
@@ -192,12 +191,10 @@ def main(INTERVAL, CONCURRENCY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
-  # here we wrap the populate call in try/except and loop until we have data
   while len(all_alerts) == 0:
     try:
       all_alerts = client.query_alerts()
     except:
-      # assume backend is down, lazily check back
       logging.error("Could not contact metrics source. Sleeping 30s")
       sleep(30)
 
@@ -224,7 +221,7 @@ def main(INTERVAL, CONCURRENCY):
   # make the concurrent isolated  queues
   for N in range(0, CONCURRENCY):
     for worker in workers:
-      logger.debug(f"creating Queue {worker}{N:03}")
+      # logger.debug(f"creating Queue {worker}{N:03}")
       queues[f"{worker}{N:03}"] = Queue()
     # [ queues[f"{worker}{N:03}"] = Queue() for worker in workers ]
 
@@ -239,7 +236,7 @@ def main(INTERVAL, CONCURRENCY):
   # start all the threads and pass their concurrency queue number
   for N in range(0, CONCURRENCY):
     for worker in workers:
-      logger.debug(f"starting {worker}{N:03}")
+      # logger.debug(f"starting {worker}{N:03}")
       Thread(target=eval(worker), name=f"{worker}{N:03}", args=[N]).start() 
 
 
@@ -252,7 +249,7 @@ if __name__ == '__main__':
   parser.add_argument("-c", "--concurrency", help="worker concurrency",
                     type=int, default=2)
   parser.add_argument("-i", "--interval", help="internal operation interval. max 15",
-                    type=int, default=1)
+                    type=int, default=2)
   parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
                     type=str, default="info")
   args = parser.parse_args()

@@ -5,7 +5,6 @@ from queue import Queue
 from threading import Thread
 from time import time, sleep
 from math import floor
-import random
 import logging
 import sys
 import argparse
@@ -50,40 +49,43 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
 
-  # initial jitter, only done once per thread to stagger them
-  sleep(random.randint(1,10) / 33)
-
   # run forever
   while True:
     start_time = time()
-    i_sleep = ( INTERVAL / pollQ.qsize() ) 
+    i_sleep = (INTERVAL / (pollQ.qsize()))
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
-      logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
+      # logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
 
-      # only query if ~intervalSecs within INTERVAL margin
+      # Check for intervalSecs
+      # Allows for changing interval
       if not floor(time() % item.intervalSecs) <= INTERVAL:
         # back on the stack
         pollQ.put(item)
         # skip to next item
         continue
 
-      # internal micro sleep to slow down
-      # this is pre-determined  micro_sleep value, - (current time - start_time)
-      # or micro_sleep - elapsed
-      sleep(zero_or_val(i_sleep - (time() - start_time)))
       # catch unavailable backends
-      try:
-        # get numeric value from API
-        logger.debug(f"Worker poll{N:03} attempt to query for {item.query}")
-        # make the external call, this fails sometimes
-        val = client.query(item.query)
+      # we give ourselves a few tries
+      val = False
+      for attempt in range(3):
+        if not val:
+          # get numeric value from API
+          logger.debug(f"Worker poll{N:03} query attempt #{attempt} for {item.query}")
+          # make the external call, this fails sometimes
+          try:
+            val = client.query(item.query)
+          except Exception as err:
+            logger.warning(f"Worker poll{N:03} failed query attempt #{attempt} for {item.name}: {err}")
+            # slow down the retry just a little
+            sleep(zero_or_val(i_sleep) / 3)
 
-      except Exception as err :
-        logger.warning(f"Worker poll{N:03} failed to query for {item.name}: {err}")
+      # all attempts exhausted, skip to next 
+      if not val:
         # add to back of line
         pollQ.put(item)
+        sleep(zero_or_val(i_sleep - (time() - start_time)))
         # we skip to next Alert
         continue
 
@@ -128,26 +130,37 @@ def notify(N):
   # run forever
   while True:
     start_time = time()
-    logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
+    # logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
 
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
 
+      OK = False
       # First time, or re-trigger
-      try:
-        # values of 0, or repeatIntervalSecs seconds elapsed
-        if item.triggered_sec + item.repeatIntervalSecs <= time():
-          item.triggered_sec = time()
-          logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
-          client.notify(item.name, item.state)
-        # check if within repeatIntervalSecs window
-        elif item.triggered_sec + item.repeatIntervalSecs >= time():
-          logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
-        # put back on pollQ with new values
-      except:
-        logger.warning(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
+      # values of 0, or repeatIntervalSecs seconds elapsed
+      if item.triggered_sec + item.repeatIntervalSecs < floor(time()):
+        item.triggered_sec = floor(time())
+        for attempt in range(3):
 
-      # back to the end of the line
+          if not OK:
+            try:
+              logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
+              client.notify(item.name, item.state)
+
+            # Problem, tell somebody
+            except Exception as err:
+              logger.warning(f"Worker notify{N:03} failed attempt #{attempt} for {item.name}: {err}")
+              continue
+
+          # if we made it here, post succeeded. set True so we don't resend
+          OK = True
+
+      # check if within repeatIntervalSecs window
+      # We've already sent a trigger, so we wait.
+      elif item.triggered_sec + item.repeatIntervalSecs >= floor(time()):
+        logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
+
+      # put back on pollQ with new values
       pollQ.put(item)
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
@@ -159,7 +172,7 @@ def resolve(N):
   # run forever
   while True:
     start_time = time()
-    logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
+    # logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
 
     for i in range(resolveQ.qsize()):
       item = resolveQ.get()
@@ -178,12 +191,10 @@ def main(INTERVAL, CONCURRENCY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
-  # here we wrap the populate call in try/except and loop until we have data
   while len(all_alerts) == 0:
     try:
       all_alerts = client.query_alerts()
     except:
-      # assume backend is down, lazily check back
       logging.error("Could not contact metrics source. Sleeping 30s")
       sleep(30)
 
@@ -210,7 +221,7 @@ def main(INTERVAL, CONCURRENCY):
   # make the concurrent isolated  queues
   for N in range(0, CONCURRENCY):
     for worker in workers:
-      logger.debug(f"creating Queue {worker}{N:03}")
+      # logger.debug(f"creating Queue {worker}{N:03}")
       queues[f"{worker}{N:03}"] = Queue()
     # [ queues[f"{worker}{N:03}"] = Queue() for worker in workers ]
 
@@ -225,7 +236,7 @@ def main(INTERVAL, CONCURRENCY):
   # start all the threads and pass their concurrency queue number
   for N in range(0, CONCURRENCY):
     for worker in workers:
-      logger.debug(f"starting {worker}{N:03}")
+      # logger.debug(f"starting {worker}{N:03}")
       Thread(target=eval(worker), name=f"{worker}{N:03}", args=[N]).start() 
 
 
