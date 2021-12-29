@@ -49,6 +49,9 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
 
+  # one-time only thread offset
+  sleep(N%CONCURRENCY)
+
   # run forever
   while True:
     start_time = time()
@@ -56,11 +59,10 @@ def poll(N):
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
-      # logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
 
       # Check for intervalSecs
       # Allows for changing interval
-      if not floor(time() % item.intervalSecs) <= INTERVAL:
+      if not floor(time() % item.intervalSecs) <= N%CONCURRENCY:
         # back on the stack
         pollQ.put(item)
         # skip to next item
@@ -130,7 +132,6 @@ def notify(N):
   # run forever
   while True:
     start_time = time()
-    # logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
 
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
@@ -172,16 +173,21 @@ def resolve(N):
   # run forever
   while True:
     start_time = time()
-    # logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
 
     for i in range(resolveQ.qsize()):
       item = resolveQ.get()
-      logger.info(f"Worker resolve{N:03} resolving for {item.name}")
-      try:
-        client.resolve(item.name)
-      except:
-        logger.warning(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
-        pass
+      OK = False
+      # retry loop
+      for attempt in range(3):
+        # Skip if we've had a success
+        if not OK:
+          try:
+            logger.info(f"Worker resolve{N:03} resolving attempt #{attempt} for {item.name}")
+            if client.resolve(item.name):
+              OK = True
+              continue
+          except:
+            logger.warning(f"Worker resolve{N:03} failed attempt #{attempt} for {item.name}: {err}")
 
     # wait out the duration
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
