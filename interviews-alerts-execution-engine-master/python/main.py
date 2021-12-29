@@ -4,7 +4,8 @@ from client import Client
 from queue import Queue
 from threading import Thread
 from time import time, sleep
-from math import floor
+from math import floor, ceil
+import random
 import logging
 import sys
 import argparse
@@ -22,10 +23,10 @@ class Alert(object):
 
 
 def zero_or_val(val):
-  if val < 0:
-    return 0
-  else:
+  """ Helper: no negative numbers. zero, or the input. """
+  if val > 0:
     return val
+  return 0
 
 
 def val2state(item, value):
@@ -49,33 +50,47 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
 
+  # each poll worker sleeps N seconds at start
+  # initial jitter, only done once per thread to stagger them
+  sleep(N)
+
   # run forever
   while True:
     start_time = time()
-    i_sleep = (INTERVAL / (pollQ.qsize()))
+    i_sleep = ( INTERVAL / (pollQ.qsize()*3) ) 
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
-      logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
+      # logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
 
-      # Check for intervalSecs
-      # Allows for changing interval
-      if not floor(time() % item.intervalSecs) <= INTERVAL:
+      # early exit from loop if it's not time to poll
+      # when time % interval == N : it's our turn
+      # this is a method of staggering the polling
+      if not floor(time() % item.intervalSecs) == N:
         # back on the stack
         pollQ.put(item)
         # skip to next item
         continue
 
+      val = False
       # catch unavailable backends
-      try:
-        # get numeric value from API
-        val = client.query(item.query)
+      # we give ourselves a few tries
+      for attempt in range(3):
+        if not val:
+          # get numeric value from API
+          logger.debug(f"Worker poll{N:03} query attempt #{attempt} for {item.query}")
+          # make the external call, this fails sometimes
+          try:
+            val = client.query(item.query)
+          except Exception as err:
+            logger.warning(f"Worker poll{N:03} FAILED query attempt #{attempt} for {item.name}: {err}")
+            # slow down the retry just a little
+            sleep(zero_or_val(i_sleep) / 3)
 
-      except Exception as err :
-        logger.warning(f"Worker poll{N:03} failed to query for {item.name}: {err}")
+      # all attempts exhausted, skip to next 
+      if not val:
         # add to back of line
         pollQ.put(item)
-        sleep(zero_or_val(i_sleep - (time() - start_time)))
         # we skip to next Alert
         continue
 
@@ -90,9 +105,10 @@ def poll(N):
           item.state = new_state
           item.triggered_sec == 0
         # Add the alert item to the notification queue
-        # don't worry about re-triggers, thats what triggered_sec is for
-        notifyQ.put(item)
         # do not put item on pollQ and skip to next item
+        notifyQ.put(item)
+        # Sleep a little so we don't ratchet the backend
+        sleep(zero_or_val(INTERVAL - (time() - start_time)))
         continue
 
       # here we catch the change back from non-pass to pass
@@ -106,9 +122,10 @@ def poll(N):
           # put alert on resolve queue
           resolveQ.put(item)
 
-      # Add alert back to the end of the line
       logger.debug(f"Worker poll{N:03} putting {item.name} back on pollQ{N:03}")
+      # Add alert back to the end of the line
       pollQ.put(item)
+    # Sleep a little so we don't ratchet the backend
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
 
@@ -120,26 +137,31 @@ def notify(N):
   # run forever
   while True:
     start_time = time()
-    logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
+    # logger.debug(f"There are {notifyQ.qsize()} items in notify{N:03}")
 
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
-      # First time, or re-trigger
 
-      try:
-        # values of 0, or repeatIntervalSecs seconds elapsed
-        if item.triggered_sec + item.repeatIntervalSecs <= time():
-          item.triggered_sec = time()
-          logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
-          client.notify(item.name, item.state)
-        # check if within repeatIntervalSecs window
-        elif item.triggered_sec + item.repeatIntervalSecs >= time():
-          pass
-        # put back on pollQ with new values
-      except:
-        logger.warning(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
+      val = False
+      for attempt in range(3):
+        if not val:
+          # First time, or re-trigger
+          try:
+            # values of 0, or repeatIntervalSecs seconds elapsed
+            if item.triggered_sec + item.repeatIntervalSecs <= time():
+              item.triggered_sec = time()
+              logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
+              client.notify(item.name, item.state)s
+            # check if within repeatIntervalSecs window
+            elif item.triggered_sec + item.repeatIntervalSecs >= time():
+              logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
+            # if we made it here, post succeeded. set True so we don't resend
+            val = True
+          # Problem, tell somebody
+          except Exception as err:
+            logger.warning(f"Worker notify{N:03} FAILED attempt #{attempt} for {item.name}: {err}")
 
-      # back to the end of the line
+     # put back on pollQ with new values
       pollQ.put(item)
     sleep(zero_or_val(INTERVAL - (time() - start_time)))
 
@@ -151,7 +173,7 @@ def resolve(N):
   # run forever
   while True:
     start_time = time()
-    logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
+    # logger.debug(f"There are {resolveQ.qsize()} items in resolve{N:03}")
 
     for i in range(resolveQ.qsize()):
       item = resolveQ.get()
@@ -170,10 +192,12 @@ def main(INTERVAL, CONCURRENCY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
+  # here we wrap the populate call in try/except and loop until we have data
   while len(all_alerts) == 0:
     try:
       all_alerts = client.query_alerts()
     except:
+      # assume backend is down, lazily check back
       logging.error("Could not contact metrics source. Sleeping 30s")
       sleep(30)
 
@@ -228,7 +252,7 @@ if __name__ == '__main__':
   parser.add_argument("-c", "--concurrency", help="worker concurrency",
                     type=int, default=2)
   parser.add_argument("-i", "--interval", help="internal operation interval. max 15",
-                    type=int, default=2)
+                    type=int, default=1)
   parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
                     type=str, default="info")
   args = parser.parse_args()

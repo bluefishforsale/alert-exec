@@ -5,6 +5,7 @@ from queue import Queue
 from threading import Thread
 from time import time, sleep
 from math import floor
+import random
 import logging
 import sys
 import argparse
@@ -49,33 +50,40 @@ def poll(N):
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
 
+  # initial jitter, only done once per thread to stagger them
+  sleep(random.randint(1,10) / 33)
+
   # run forever
   while True:
     start_time = time()
-    i_sleep = (INTERVAL / (pollQ.qsize()+1))
+    i_sleep = ( INTERVAL / pollQ.qsize() ) 
     for i in range(pollQ.qsize()):
       # get item from queue
       item = pollQ.get()
       logging.debug(f"Worker poll{N:03} got {item.name} from pollQ{N:03}")
 
-      # Check for intervalSecs
-      # catch 0 or 1
-      if not floor(time() % item.intervalSecs) <= 1:
+      # only query if ~intervalSecs within INTERVAL margin
+      if not floor(time() % item.intervalSecs) <= INTERVAL:
         # back on the stack
         pollQ.put(item)
         # skip to next item
         continue
 
+      # internal micro sleep to slow down
+      # this is pre-determined  micro_sleep value, - (current time - start_time)
+      # or micro_sleep - elapsed
+      sleep(zero_or_val(i_sleep - (time() - start_time)))
       # catch unavailable backends
       try:
         # get numeric value from API
+        logger.debug(f"Worker poll{N:03} attempt to query for {item.query}")
+        # make the external call, this fails sometimes
         val = client.query(item.query)
 
       except Exception as err :
-        logger.warn(f"Worker poll{N:03} failed to query for {item.name}: {err}")
+        logger.warning(f"Worker poll{N:03} failed to query for {item.name}: {err}")
         # add to back of line
         pollQ.put(item)
-        sleep(zero_or_val(i_sleep - (time() - start_time)))
         # we skip to next Alert
         continue
 
@@ -124,8 +132,8 @@ def notify(N):
 
     for i in range(notifyQ.qsize()):
       item = notifyQ.get()
-      # First time, or re-trigger
 
+      # First time, or re-trigger
       try:
         # values of 0, or repeatIntervalSecs seconds elapsed
         if item.triggered_sec + item.repeatIntervalSecs <= time():
@@ -134,10 +142,10 @@ def notify(N):
           client.notify(item.name, item.state)
         # check if within repeatIntervalSecs window
         elif item.triggered_sec + item.repeatIntervalSecs >= time():
-          pass
+          logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
         # put back on pollQ with new values
       except:
-        logger.warn(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
+        logger.warning(f"Worker notify{N:03} failed to get response from the backend. Will try again later.")
 
       # back to the end of the line
       pollQ.put(item)
@@ -159,7 +167,7 @@ def resolve(N):
       try:
         client.resolve(item.name)
       except:
-        logger.warn(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
+        logger.warning(f"Worker resolve{N:03} failed to get response from the backend. Will try again later.")
         pass
 
     # wait out the duration
@@ -170,10 +178,12 @@ def main(INTERVAL, CONCURRENCY):
   """ Main function: gets all alerts, creates concurrency queues, and starts workers"""
 
   all_alerts = list()
+  # here we wrap the populate call in try/except and loop until we have data
   while len(all_alerts) == 0:
     try:
       all_alerts = client.query_alerts()
     except:
+      # assume backend is down, lazily check back
       logging.error("Could not contact metrics source. Sleeping 30s")
       sleep(30)
 
@@ -182,8 +192,8 @@ def main(INTERVAL, CONCURRENCY):
   # sanity check on the interval
   if INTERVAL <= 0:
     INTERVAL = 1
-  elif INTERVAL > 3600:
-    INTERVAL = 3600
+  elif INTERVAL > 15:
+    INTERVAL = 15
   # sanity check on the concurrency
   if CONCURRENCY <= 0:
     CONCURRENCY = 1
@@ -226,8 +236,8 @@ if __name__ == '__main__':
     formatter_class=argparse.ArgumentDefaultsHelpFormatter
   )
   parser.add_argument("-c", "--concurrency", help="worker concurrency",
-                    type=int, default=1)
-  parser.add_argument("-i", "--interval", help="internal operation interval",
+                    type=int, default=2)
+  parser.add_argument("-i", "--interval", help="internal operation interval. max 15",
                     type=int, default=2)
   parser.add_argument("-l", "--log", help="logging level eg. [critical, error, warn, warning, info, debug]",
                     type=str, default="info")
