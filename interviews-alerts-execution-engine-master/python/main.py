@@ -22,6 +22,7 @@ class Alert(object):
 
 
 def zero_or_val(val):
+  """ Returns any positive value, or zero if negative """
   if val < 0:
     return 0
   else:
@@ -44,13 +45,17 @@ def val2state(item, value):
 
 
 def poll(N):
-  """ Worker 1/3 : collect update and compare. Put alert in notifyQ"""
+  """ Worker 1/3 : collect update and compare. Put alert in notifyQ
+      This is a long, complex function. Apologies in advance. 
+      The reason for the lengh is many-fold. 
+      First there is the nuance of the intervalSecs, we only poll if it's our time
+      Next is the retry behavior of the poller, as the backend sometimes fails.
+      Additionally, the complex logic of state transitions is here.
+      An attempt was made.
+  """
   pollQ = queues[f"poll{N:03}"]
   notifyQ = queues[f"notify{N:03}"]
   resolveQ = queues[f"resolve{N:03}"]
-
-  # one-time only thread offset
-  sleep(N%CONCURRENCY)
 
   # run forever
   while True:
@@ -60,9 +65,8 @@ def poll(N):
       # get item from queue
       item = pollQ.get()
 
-      # Check for intervalSecs
-      # Allows for changing interval
-      if not floor(time() % item.intervalSecs) <= N%CONCURRENCY:
+      # Check for intervalSecs, skip to next early if not our time
+      if not floor(time() % item.intervalSecs) <= INTERVAL:
         # back on the stack
         pollQ.put(item)
         # skip to next item
@@ -102,12 +106,11 @@ def poll(N):
           item.state = new_state
           item.triggered_sec == 0
         # Add the alert item to the notification queue
-        # don't worry about re-triggers, thats what triggered_sec is for
         notifyQ.put(item)
         # do not put item on pollQ and skip to next item
         continue
 
-      # here we catch the change back from non-pass to pass
+      # catch the change back from non-pass to pass
       elif new_state == 'PASS':
         if item.state != new_state:
           # reset triggered sec
@@ -147,17 +150,14 @@ def notify(N):
             try:
               logger.info(f"Worker notify{N:03} triggered {item.name} {item.state}")
               client.notify(item.name, item.state)
+              OK = True
 
             # Problem, tell somebody
             except Exception as err:
               logger.warning(f"Worker notify{N:03} failed attempt #{attempt} for {item.name}: {err}")
               continue
 
-          # if we made it here, post succeeded. set True so we don't resend
-          OK = True
-
-      # check if within repeatIntervalSecs window
-      # We've already sent a trigger, so we wait.
+      # within repeatIntervalSecs window, log if debug
       elif item.triggered_sec + item.repeatIntervalSecs >= floor(time()):
         logger.debug(f"Worker notify{N:03} waiting {item.name} {item.state}")
 
@@ -183,9 +183,8 @@ def resolve(N):
         if not OK:
           try:
             logger.info(f"Worker resolve{N:03} resolving attempt #{attempt} for {item.name}")
-            if client.resolve(item.name):
-              OK = True
-              continue
+            client.resolve(item.name)
+            OK = True
           except:
             logger.warning(f"Worker resolve{N:03} failed attempt #{attempt} for {item.name}: {err}")
 
