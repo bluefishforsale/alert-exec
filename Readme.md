@@ -18,21 +18,26 @@ Displaying the help banner:
 
 #### Supported runtime parameters:
 ```
-usage: alert-exec [-h] [-c CONCURRENCY] [-i INTERVAL] [-l LOG]
+❯ ./main.py -h
+usage: alert-exec [-h] [-c CONCURRENCY] [-i INTERVAL] [-r RETRY] [-l LOG]
 
 optional arguments:
   -h, --help            show this help message and exit
   -c CONCURRENCY, --concurrency CONCURRENCY
                         worker concurrency (default: 2)
   -i INTERVAL, --interval INTERVAL
-                        internal operation interval (default: 2)
+                        internal operation interval. max 15 (default: 1)
+  -r RETRY, --retry RETRY
+                        Failure retry count (default: 3)
   -l LOG, --log LOG     logging level eg. [critical, error, warn, warning, info, debug] (default: info)
 ```
 
 ### Options details
 The script can be run in configurable paralellism modes. The default concurrency is two worker groups. Thr parallelism divides the alerts into fair'ish buckets for polling and notifying. It will not allow settings below 1, or beyond the length of the alerts list. The maximum concurrency is the number of alerts.
 
-The script supports configurable internal timing interval. Default value of 2, and safety clamps of 1sec and 15s limit. This is for internal operation. The polling of metrics from the metrics backend happens during a scrape interval allowed per item.
+The script supports configurable internal timing interval. Default value of 1, and safety clamps of 1sec and 15s limit. This is for the internal timer operation. The polling of metrics from the metrics backend happens during a scrape interval allowed per item.
+
+Also present is the retry argument. This overrides the internal default of 3 with any number between 1 and 10. Mostly for testing backend tolerance. I left it in for others to try.
 
 Common Logging levels are supported. Debug will show extremely verbose output. Default is info. 
 
@@ -45,11 +50,11 @@ The concept is three FIFO queues. Where worker threads get Alert objects from th
 
 * On startup connect to the metrics server
 * Retrieve the list of alerts once and only once
-* Convert the list of alerts to Alert objects, adding some attributes to help mange lifecycle
+* Convert the list of alerts to Alert objects, adding some attributes to help manage lifecycle
 * Create {N} groups of workers of types [poll, notify, and resolve]
 * Create {N} collections of worker for worker types [poll, notify, and resolve] where {N} is the level of concurrency requested at runtime
 * divy up the alert items collected at start evenly between the {N} poll queues
-* start {N} goups of the worker thread types
+* start {N} groups of the worker thread types
 
 ### Thread and Queue interaction
 
@@ -64,21 +69,21 @@ This operation flow is repeated horizontally {N} times in parallel
   1. Retry logic here
   1. Calls the alert server for a value for the Alert.query
   1. Adds the Alert ojbect to the Notification queue then skips to the next Alert object
-  1. Adds a copy of the Alert ojbect to the the Resolve queue
+  1. Adds a copy of the Alert object to the the Resolve queue
   1. Adds current Alert object back to the end of the queue for the next cycle
-  1. Repeats this loop sequentially for all items in the pollQ
+  1. Repeat this loop sequentially for all items in the pollQ
   1. Then sleeps for the remainder of the INTERVAL cycle
 
   ### Notification
   1. Notifier thread is forever running
-  1. Each notifer thread knows of two queues (pollQ, notifyQ). Identified by their's numeric ID's
+  1. Each notifier thread knows of two queues (pollQ, notifyQ). Identified by their numeric ID's
   1. Thread iterates over the notification queue once, then waits
   1. Retry logic here
   1. Respect repeatInterval to determine if thread sends a message or waits. Using unix seconds + repeatInterval
   1. If logic allows, we call the notifications backend with the message. We also set the notification_sec attribute.
   1. If logic forbids, we wait out the clock
-  1. the Alert object is added back to the notificaiton Q since it was updated in this thread
-  1. Repeats this loop sequentially for all items in the pollQ
+  1. the Alert object is added back to the notification Q since it was updated in this thread
+  1. Repeat this loop sequentially for all items in the pollQ
   1. Then sleeps for the remainder of the INTERVAL cycle  
 
   ### Resolver
@@ -87,7 +92,7 @@ This operation flow is repeated horizontally {N} times in parallel
   1. Thread iterates over the resolve queue once, then waits
   1. Retry logic here
   1. Calls the resolve backend with the message
-  1. Repeats this loop sequentially for all items in the resolveQ
+  1. Repeat this loop sequentially for all items in the resolveQ
   1. Then sleeps for the remainder of the INTERVAL cycle  
 
 
@@ -96,18 +101,19 @@ Globals: the concurrency mechanism chosen uses a global dictionary to hold the q
 
 Alert Class as dict with no methods: Kind of a sloppy abuse of a class here, but the alternative trade-off was a global dict (locking would have been annoying), or list of dicts (O(N) and locking). The attribute reference of classes was a slightly nicer syntax and allows for easier testing later on.
 
-Gathering the metrics list once and only once: This was not ideal, and I would have preferred something more fault tolerant. However due to the limitations of time I opted to aspiure for the minimum requirements.
+Gathering the metrics list once and only once: This was not ideal, and I would have preferred something more fault tolerant. However due to the limitations of time I opted for the minimum requirements here.
 
 Module level Logging not implemented. TBH I just could not get it working right. I opted for verbose instead of nothing. ideally I'd use a log handler, and streams so I could silence the requests module, or have that on it's own argument. 
 
 There is very little sanitization and key checking of data returned from the client. Should the format change, this will undoubtedly break the script.
 
-Poll worker function is more complex than I'd like. I opted for this approach  as it's self-contained. I thought about helper functions each for a simple analsys and return, but had bigger problems to worry about. I got it working and moved on. It's durable and well documented, so it will be easy to fix later.
+Poll worker function is more complex than I'd like. I opted for this approach  as it's self-contained. I thought about helper functions each for a simple analysis and return, but had bigger problems to worry about. I got it working and moved on. It's durable and well documented, so it will be easy to fix later.
 
-# limitations of the backend
+# Backend limitations
 
 
-The metrics backend does seem to have some rate-limits in place. I have been able to take it offline through too many concurrent queries. I have noticed that it will resume operation after some time. This leads me to think the rate limit is implemented as a sliding window bucket. I have made not accomodation for this
+The provided metrics backend `quay.io/chronosphereiotest/interview-alerts-engine:v2` returns 500 ISE occasionally. Through loadtesting it shows up ~1.2% of the time.
+I have noticed that it will resume operation on the next query through. Very rarely are there repeated 500s.
 
 Seen in my logging as:
 ```
@@ -133,12 +139,12 @@ Code 500 : 70 (1.2 %)
 ```
 
 #### Dealing with those limitations
+Should the initial HTTP call to gather alerts fail; then the script waits until that endpoint is able to provide the needed data.
+
 The implementation tries to be tolerant of backends which are sporatically unavailable through the use of try/except blocks around HTTP calls which could fail. Logging was used to spot this initially. Also for the poll / notify / resolve HTTP calls, a retry was implemented to ensure durability. It was noticed that if the first call failed, the second would succeed. A static retry count was used, but it could be made into an argument.
 
-Should the inital HTTP call to gather alerts fail; then the script waits until that endpoint is able to provide the needed data.
-
-Time-spread call for polling. Dividing the (interval / alert count+1) `i_sleep`. In hopes this would alow for a smoother calling of the backend. A later tweak added the inclusion of the elapsed time so far in the worker. This allowed for more even distribution of calls, more concurrent polling workers, and fewer backend 500's
+Time-spread call for polling. Dividing the (interval / alert count+1) `i_sleep`. In hopes this would allow for a smoother calling of the backend. A later tweak added the inclusion of the elapsed time so far in the worker. This allowed for more even distribution of calls, more concurrent polling workers, and fewer backend 500's
 
 Opinionated `intervalSecs`. I saw that the body returned from the metrics server had an intervalSec field. I chose a different method than `repeatIntervalSecs`. Instead of capturing a timestamp and doing evaluation, I chose for this to modulo the current time with the items intervalSec then floor it. Knowing it would be some value between 0 and intervalSec. If the value is less than or eqal to the internal action interval, then we can poll it. 
 
-The `INTERVAL` option is an internal resolution timer that actions occur on. A clock-work of sorts. It's used for polling and sleeping. All actions start at the next tick of the timer, in all worker threads. I had a variant where each poller thread slept `N` and that `N` was also used to evaluate if polling would occur. This  It's also used to spread out polling using the `i_sleep` variable
+The `INTERVAL` option is an internal resolution timer that actions occur on. A clockwork of sorts. It's used for polling and sleeping. All actions start at the next tick of the timer, in all worker threads. I had a variant where each poller thread slept `N` and that `N` was also used to evaluate if polling would occur. This  It's also used to spread out polling using the `i_sleep` variable
